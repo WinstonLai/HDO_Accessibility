@@ -1,0 +1,8 @@
+.env
+.token_cache.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/
+*.egg-info/
