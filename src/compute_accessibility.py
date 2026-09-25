@@ -31,12 +31,16 @@ from src.onemap_client import OneMapClient
 
 def _load_route_cache() -> dict[tuple[str, int], float | None]:
     if config.ROUTE_CACHE_PATH.exists():
-        cached = pd.read_csv(config.ROUTE_CACHE_PATH)
+        # dtype=str on postal_code is load-bearing: without it, a pure-digit
+        # text column round-trips through CSV as float64 (e.g. "190001" ->
+        # 190001.0 -> "190001.0"), which then never matches the plain string
+        # keys used everywhere else in this module - silently breaking the
+        # cache (100% miss on every resumed run). zip() over columns instead
+        # of iterrows() also avoids per-row Series overhead on ~200k+ rows.
+        cached = pd.read_csv(config.ROUTE_CACHE_PATH, dtype={"postal_code": str})
         return {
-            (str(row["postal_code"]), int(row["dining_idx"])): (
-                None if pd.isna(row["walk_distance_m"]) else float(row["walk_distance_m"])
-            )
-            for _, row in cached.iterrows()
+            (pc, int(idx)): (None if pd.isna(dist) else float(dist))
+            for pc, idx, dist in zip(cached["postal_code"], cached["dining_idx"], cached["walk_distance_m"])
         }
     return {}
 
@@ -79,23 +83,24 @@ def compute(
 
     cache = _load_route_cache()
     postal_codes = residential["postal_code"].astype(str).tolist()
+    # Plain numpy arrays instead of repeated .iloc[] lookups - .iloc is slow
+    # enough per-call that doing it ~200k+ times in a loop dominates runtime.
+    res_lat, res_lon = residential["lat"].to_numpy(), residential["lon"].to_numpy()
+    dine_lat, dine_lon = dining["lat"].to_numpy(), dining["lon"].to_numpy()
 
     # Build the flat list of (postal_code, dining_idx) pairs not yet resolved.
     pending: list[tuple[str, int, tuple[float, float], tuple[float, float]]] = []
     seen: set[tuple[str, int]] = set()
     for row_i, dining_idxs in enumerate(candidate_indices):
         postal_code = postal_codes[row_i]
-        res_row = residential.iloc[row_i]
+        start = (res_lat[row_i], res_lon[row_i])
         for dining_idx in dining_idxs:
             dining_idx = int(dining_idx)
             key = (postal_code, dining_idx)
             if key in cache or key in seen:
                 continue
             seen.add(key)
-            dine_row = dining.iloc[dining_idx]
-            pending.append(
-                (postal_code, dining_idx, (res_row["lat"], res_row["lon"]), (dine_row["lat"], dine_row["lon"]))
-            )
+            pending.append((postal_code, dining_idx, start, (dine_lat[dining_idx], dine_lon[dining_idx])))
 
     total_pairs = sum(len(idxs) for idxs in candidate_indices)
     print(
