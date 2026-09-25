@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-data/
+data/raw/
+data/processed/*
+!data/processed/accessibility_by_postal_code.csv
 *.egg-info/
