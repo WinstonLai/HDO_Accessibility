@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Blocks a commit if data/processed/accessibility_by_postal_code.csv (or any
+# CSV given as an arg) has malformed postal_code values - e.g. a leading zero
+# silently dropped by pandas int64 inference. See scripts/validate_postal_codes.py.
+#
+# Enable once per clone with:
+#   git config core.hooksPath githooks
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ ! -f data/processed/accessibility_by_postal_code.csv ]; then
+    exit 0
+fi
+
+if ! git diff --cached --name-only | grep -q '^data/processed/accessibility_by_postal_code\.csv$'; then
+    exit 0
+fi
+
+python="python3"
+if [ -x .venv/bin/python ]; then
+    python=".venv/bin/python"
+fi
+
+if ! "$python" scripts/validate_postal_codes.py; then
+    echo "pre-commit hook: aborting commit due to postal_code validation failure." >&2
+    exit 1
+fi
