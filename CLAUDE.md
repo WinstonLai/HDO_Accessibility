@@ -12,6 +12,7 @@ A pipeline that answers one business question: **how many HPB Healthier Dining P
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in ONEMAP_EMAIL / ONEMAP_PASSWORD (register at onemap.gov.sg/apidocs/register)
+git config core.hooksPath githooks   # enables the pre-commit postal_code check below
 ```
 
 OneMap has no static API key — auth is email+password exchanged for a JWT (`POST /api/auth/post/getToken`, ~3 day TTL), handled automatically by `src/onemap_client.py` and cached in the gitignored `.token_cache.json`.
@@ -46,6 +47,8 @@ No test suite, linter, or build step exists in this repo.
 2. OneMap's Routing API (`routeType=walk`) resolves true walking distance for each surviving candidate pair, via a `ThreadPoolExecutor` (`config.ROUTING_MAX_WORKERS`, default 6). Results are cached to `data/raw/walk_route_cache.csv` keyed by `(postal_code, dining_idx)` so interrupted/resumed runs don't re-fetch resolved pairs.
 
 **Cache-loading gotcha (already fixed, don't regress it):** when reading `walk_route_cache.csv` back, `postal_code` must be loaded with `dtype={"postal_code": str}`. Without it, `pd.read_csv` silently infers the column as float64 (e.g. `"190001"` round-trips to `"190001.0"`), which then never matches the plain-string keys built elsewhere from the residential DataFrame — causing 100% cache misses and full re-computation on every resumed run (this happened once and cost a wasted ~12-hour re-run before being caught). See the comment in `_load_route_cache` for the full explanation.
+
+The same class of bug (missing `dtype={"postal_code": str}` on a `pd.read_csv`) previously stripped leading zeros from ~1% of postal codes in three separate places — `fetch_residential.py`'s geocode cache, and both the residential and dining reads in `compute_accessibility.py`. Any new `pd.read_csv` on a file with a `postal_code` column must set that dtype explicitly. A git pre-commit hook (`githooks/pre-commit`, run via `scripts/validate_postal_codes.py`) blocks committing `data/processed/accessibility_by_postal_code.csv` if any postal code isn't a well-formed 6-digit string — enable it once per clone with `git config core.hooksPath githooks` (see Setup).
 
 **OneMap rate limits are undocumented and real.** Empirically the sustained ceiling is ~5 requests/sec regardless of concurrency; going above it produces `429`s that get retried (`tenacity`, exponential backoff, `config.MAX_RETRIES`) rather than help. `src/onemap_client.py`'s `OneMapClient` shares one `requests.Session` across threads with per-thread throttling (`threading.local`) and a lock-guarded token refresh (`get_token`) to avoid races when multiple worker threads see an expiring token simultaneously. A full `accessibility` run over all residential postal codes is on the order of hours, not minutes — always sanity-check with `--limit` first, and expect to run the full pass in the background.
 
