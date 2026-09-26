@@ -47,7 +47,10 @@ def download_hdb_property_info() -> pd.DataFrame:
 
 def _load_geocode_cache() -> dict[str, dict]:
     if config.GEOCODE_CACHE_PATH.exists():
-        cached = pd.read_csv(config.GEOCODE_CACHE_PATH)
+        # Without dtype=str, pandas infers postal_code as int64 and strips
+        # leading zeros (e.g. "081001" -> "81001") - same class of bug as the
+        # walk_route_cache dtype gotcha (see compute_accessibility.py).
+        cached = pd.read_csv(config.GEOCODE_CACHE_PATH, dtype={"postal_code": str})
         return {row["query"]: row.to_dict() for _, row in cached.iterrows()}
     return {}
 
