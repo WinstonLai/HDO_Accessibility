@@ -21,13 +21,15 @@ LON_KEYS = ("LONGITUDE", "LON", "LNG", "X")
 
 
 def _first_present(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    # theme responses are inconsistently cased across datasets, so normalize
+    # once and fall through to the next candidate key whenever a match is
+    # missing or empty - don't stop at the first case-insensitive hit if its
+    # value is blank.
+    normalized = {k.upper(): v for k, v in row.items()}
     for k in keys:
-        if k in row and row[k] not in (None, ""):
-            return row[k]
-        # theme responses are inconsistently cased across datasets
-        for actual_key in row:
-            if actual_key.upper() == k:
-                return row[actual_key]
+        v = normalized.get(k)
+        if v not in (None, ""):
+            return v
     return None
 
 

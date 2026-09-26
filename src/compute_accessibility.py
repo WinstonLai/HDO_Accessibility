@@ -8,8 +8,12 @@ Two-stage approach:
    full cross join.
 2. OneMap's walking Routing API gives the true walk distance for each
    surviving candidate pair. Results are cached to disk keyed by
-   (postal_code, dining index) so an interrupted run can resume without
-   re-querying pairs already resolved.
+   (postal_code, dining_id) so an interrupted run can resume without
+   re-querying pairs already resolved. dining_id is a stable identifier
+   derived from dining row content (postal_code + name), not the dining
+   DataFrame's positional row index - a positional index would silently
+   point at a different dining location if healthier_dining_options.csv is
+   ever regenerated with different row order/content between runs.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from src.geo_utils import build_ball_tree, radius_candidates
 from src.onemap_client import OneMapClient
 
 
-def _load_route_cache() -> dict[tuple[str, int], float | None]:
+def _load_route_cache() -> dict[tuple[str, str], float | None]:
     if config.ROUTE_CACHE_PATH.exists():
         # dtype=str on postal_code is load-bearing: without it, a pure-digit
         # text column round-trips through CSV as float64 (e.g. "190001" ->
@@ -38,20 +42,40 @@ def _load_route_cache() -> dict[tuple[str, int], float | None]:
         # cache (100% miss on every resumed run). zip() over columns instead
         # of iterrows() also avoids per-row Series overhead on ~200k+ rows.
         cached = pd.read_csv(config.ROUTE_CACHE_PATH, dtype={"postal_code": str})
+        if "dining_id" not in cached.columns:
+            # Pre-existing cache from before the dining_id cache-key schema
+            # change (it had a "dining_idx" column instead) - positional
+            # indices aren't safely reusable, so treat this as a cold cache
+            # rather than crashing on the missing column.
+            print(
+                f"{config.ROUTE_CACHE_PATH} uses the old dining_idx cache schema - "
+                "starting with a cold cache (all pairs will be re-resolved)."
+            )
+            return {}
+        cached["dining_id"] = cached["dining_id"].astype(str)
         return {
-            (pc, int(idx)): (None if pd.isna(dist) else float(dist))
-            for pc, idx, dist in zip(cached["postal_code"], cached["dining_idx"], cached["walk_distance_m"])
+            (pc, did): (None if pd.isna(dist) else float(dist))
+            for pc, did, dist in zip(cached["postal_code"], cached["dining_id"], cached["walk_distance_m"])
         }
     return {}
 
 
-def _save_route_cache(cache: dict[tuple[str, int], float | None]) -> None:
+def _save_route_cache(cache: dict[tuple[str, str], float | None]) -> None:
     config.DATA_RAW_DIR.mkdir(parents=True, exist_ok=True)
     rows = [
-        {"postal_code": pc, "dining_idx": idx, "walk_distance_m": dist}
-        for (pc, idx), dist in cache.items()
+        {"postal_code": pc, "dining_id": did, "walk_distance_m": dist}
+        for (pc, did), dist in cache.items()
     ]
     pd.DataFrame(rows).to_csv(config.ROUTE_CACHE_PATH, index=False)
+
+
+def _dining_ids(dining: pd.DataFrame) -> list[str]:
+    # A stable identifier derived from dining row content, immune to the
+    # DataFrame's positional row order changing across pipeline runs (e.g.
+    # a re-run of `python main.py dining` reordering or adding/removing
+    # rows) - unlike a positional index, which would then silently point
+    # cached distances at the wrong dining location.
+    return (dining["postal_code"].astype(str) + "|" + dining["name"].fillna("").astype(str)).tolist()
 
 
 def walk_distance_m(client: OneMapClient, start: tuple[float, float], end: tuple[float, float]) -> float | None:
@@ -83,24 +107,26 @@ def compute(
 
     cache = _load_route_cache()
     postal_codes = residential["postal_code"].astype(str).tolist()
+    dining_ids = _dining_ids(dining)
     # Plain numpy arrays instead of repeated .iloc[] lookups - .iloc is slow
     # enough per-call that doing it ~200k+ times in a loop dominates runtime.
     res_lat, res_lon = residential["lat"].to_numpy(), residential["lon"].to_numpy()
     dine_lat, dine_lon = dining["lat"].to_numpy(), dining["lon"].to_numpy()
 
-    # Build the flat list of (postal_code, dining_idx) pairs not yet resolved.
-    pending: list[tuple[str, int, tuple[float, float], tuple[float, float]]] = []
-    seen: set[tuple[str, int]] = set()
+    # Build the flat list of (postal_code, dining_id) pairs not yet resolved.
+    pending: list[tuple[str, str, tuple[float, float], tuple[float, float]]] = []
+    seen: set[tuple[str, str]] = set()
     for row_i, dining_idxs in enumerate(candidate_indices):
         postal_code = postal_codes[row_i]
         start = (res_lat[row_i], res_lon[row_i])
         for dining_idx in dining_idxs:
             dining_idx = int(dining_idx)
-            key = (postal_code, dining_idx)
+            dining_id = dining_ids[dining_idx]
+            key = (postal_code, dining_id)
             if key in cache or key in seen:
                 continue
             seen.add(key)
-            pending.append((postal_code, dining_idx, start, (dine_lat[dining_idx], dine_lon[dining_idx])))
+            pending.append((postal_code, dining_id, start, (dine_lat[dining_idx], dine_lon[dining_idx])))
 
     total_pairs = sum(len(idxs) for idxs in candidate_indices)
     print(
@@ -112,18 +138,18 @@ def compute(
     cache_lock = threading.Lock()
     completed = 0
 
-    def _resolve(item: tuple[str, int, tuple[float, float], tuple[float, float]]) -> None:
+    def _resolve(item: tuple[str, str, tuple[float, float], tuple[float, float]]) -> None:
         nonlocal completed
-        postal_code, dining_idx, start, end = item
+        postal_code, dining_id, start, end = item
         try:
             dist = walk_distance_m(client, start, end)
         except Exception as exc:  # noqa: BLE001 - leave uncached so a resumed run retries it, keep going
-            print(f"  routing failed for postal_code={postal_code} dining_idx={dining_idx}: {exc}")
+            print(f"  routing failed for postal_code={postal_code} dining_id={dining_id}: {exc}")
             with cache_lock:
                 completed += 1
             return
         with cache_lock:
-            cache[(postal_code, dining_idx)] = dist
+            cache[(postal_code, dining_id)] = dist
             completed += 1
             if completed % flush_every == 0:
                 _save_route_cache(cache)
@@ -142,7 +168,7 @@ def compute(
         within_1km = sum(
             1
             for dining_idx in dining_idxs
-            if (dist := cache.get((postal_code, int(dining_idx)))) is not None
+            if (dist := cache.get((postal_code, dining_ids[int(dining_idx)]))) is not None
             and dist <= config.WALK_DISTANCE_THRESHOLD_M
         )
         counts.append(within_1km)
