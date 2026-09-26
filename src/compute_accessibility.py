@@ -179,7 +179,10 @@ def compute(
 
 
 def run(limit: int | None = None) -> pd.DataFrame:
-    residential = pd.read_csv(config.RESIDENTIAL_OUTPUT_PATH)
+    # dtype=str on postal_code is load-bearing: without it, pure-digit postal
+    # codes with a leading zero (e.g. "081001") get read back as int64 and
+    # lose the zero. See the identical route-cache gotcha above.
+    residential = pd.read_csv(config.RESIDENTIAL_OUTPUT_PATH, dtype={"postal_code": str})
     dining = pd.read_csv(config.DINING_OUTPUT_PATH)
     if limit:
         residential = residential.head(limit)
