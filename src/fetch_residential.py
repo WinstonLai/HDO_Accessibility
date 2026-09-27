@@ -15,6 +15,7 @@ column so downstream consumers can tell HDB rows from condo rows.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -50,14 +51,31 @@ def _load_geocode_cache() -> dict[str, dict]:
         # Without dtype=str, pandas infers postal_code as int64 and strips
         # leading zeros (e.g. "081001" -> "81001") - same class of bug as the
         # walk_route_cache dtype gotcha (see compute_accessibility.py).
-        cached = pd.read_csv(config.GEOCODE_CACHE_PATH, dtype={"postal_code": str})
+        try:
+            cached = pd.read_csv(config.GEOCODE_CACHE_PATH, dtype={"postal_code": str})
+        except pd.errors.EmptyDataError:
+            # A prior run could have saved an empty cache (e.g. every geocode
+            # attempt failed due to bad credentials or an API outage, so
+            # nothing was ever written to `cache`), which writes a
+            # header-less/empty file. Treat it as a cold cache rather than
+            # crashing - same gotcha as the route cache below.
+            return {}
         return {row["query"]: row.to_dict() for _, row in cached.iterrows()}
     return {}
 
 
 def _save_geocode_cache(cache: dict[str, dict]) -> None:
+    if not cache:
+        # pd.DataFrame([]).to_csv() writes just "\n" with no header, which
+        # pd.read_csv then can't parse (EmptyDataError) - avoid ever writing
+        # that shape of file. An empty cache is equivalent to no file.
+        return
     config.DATA_RAW_DIR.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(cache.values()).to_csv(config.GEOCODE_CACHE_PATH, index=False)
+    # Atomic write (temp file + os.replace) so a crash/kill mid-flush can't
+    # truncate or corrupt geocode results accumulated across prior runs.
+    tmp_path = config.GEOCODE_CACHE_PATH.with_suffix(".tmp")
+    pd.DataFrame(cache.values()).to_csv(tmp_path, index=False)
+    os.replace(tmp_path, config.GEOCODE_CACHE_PATH)
 
 
 def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: int = 200) -> pd.DataFrame:
