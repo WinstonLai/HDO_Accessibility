@@ -10,11 +10,15 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-if [ ! -f data/processed/accessibility_by_postal_code.csv ]; then
-    exit 0
-fi
+target="data/processed/accessibility_by_postal_code.csv"
 
-if ! git diff --cached --name-only | grep -q '^data/processed/accessibility_by_postal_code\.csv$'; then
+# Query the diff status for just this path instead of listing all staged
+# files and grepping - simpler, and avoids two problems: no pipe into grep
+# to trip on SIGPIPE under `pipefail`, and no ambiguity when the file is
+# being deleted (status "D"): `git show :path` fails for a deleted path, so
+# skip validation instead of letting that failure crash the hook.
+status="$(git diff --cached --name-status -- "$target")"
+if [ -z "$status" ] || [[ "$status" == D* ]]; then
     exit 0
 fi
 
@@ -23,7 +27,10 @@ if [ -x .venv/bin/python ]; then
     python=".venv/bin/python"
 fi
 
-if ! "$python" scripts/validate_postal_codes.py; then
+# Validate the staged blob, not the working-tree copy - they can diverge
+# (e.g. further edits after `git add` without re-staging), and the hook
+# should judge what's actually about to be committed.
+if ! git show ":${target}" | "$python" scripts/validate_postal_codes.py -; then
     echo "pre-commit hook: aborting commit due to postal_code validation failure." >&2
     exit 1
 fi

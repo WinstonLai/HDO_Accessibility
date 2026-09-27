@@ -69,15 +69,25 @@ def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: 
 
     for i, query in enumerate(tqdm(to_resolve, desc="Geocoding HDB blocks")):
         try:
-            payload = client.get(
-                "/api/common/elastic/search",
-                params={"searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": 1},
-            )
-            results = payload.get("results", [])
-            # Prefer the first result with a real postal code - OneMap sometimes
-            # returns a same-address facility (e.g. a community centre sharing
-            # the block/street) with POSTAL "NIL" ahead of the residential block.
-            match = next((r for r in results if r.get("POSTAL") not in (None, "", "NIL")), None)
+            match = None
+            page_num = 1
+            total_pages = 1
+            while page_num <= total_pages:
+                payload = client.get(
+                    "/api/common/elastic/search",
+                    params={"searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": page_num},
+                )
+                results = payload.get("results", [])
+                # Capped so one query with many low-quality results can't
+                # page through dozens of throttled requests unbounded.
+                total_pages = min(int(payload.get("totalNumPages") or 1), config.GEOCODE_SEARCH_MAX_PAGES)
+                # Prefer the first result with a real postal code - OneMap sometimes
+                # returns a same-address facility (e.g. a community centre sharing
+                # the block/street) with POSTAL "NIL" ahead of the residential block.
+                match = next((r for r in results if r.get("POSTAL") not in (None, "", "NIL")), None)
+                if match is not None:
+                    break
+                page_num += 1
             cache[query] = {
                 "query": query,
                 "postal_code": match.get("POSTAL") if match else None,
@@ -86,7 +96,10 @@ def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: 
                 "lon": float(match["LONGITUDE"]) if match and match.get("LONGITUDE") else None,
             }
         except Exception as exc:  # noqa: BLE001 - keep going, log the failure per-address
-            cache[query] = {"query": query, "postal_code": None, "address": None, "lat": None, "lon": None}
+            # Deliberately NOT cached: leaving the query absent from `cache`
+            # means the next run's `to_resolve` filter retries it, instead of
+            # a transient failure (network blip, exhausted-retry 429) being
+            # permanently mistaken for "no address match" and never retried.
             print(f"  geocode failed for {query!r}: {exc}")
 
         if (i + 1) % flush_every == 0:
@@ -94,8 +107,19 @@ def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: 
 
     _save_geocode_cache(cache)
 
-    rows = [cache[q] for q in queries]
-    df = pd.DataFrame(rows)
+    # Queries that errored out (see above) are deliberately absent from
+    # `cache` so a later run retries them - so don't assume every query has
+    # an entry here; treat a still-missing one as unresolved for this run.
+    still_unresolved = sum(1 for q in queries if q not in cache)
+    if still_unresolved:
+        print(f"{still_unresolved}/{len(queries)} addresses failed to geocode this run and will be "
+              "retried on the next run.")
+    rows = [cache[q] for q in queries if q in cache]
+    # Explicit columns so a fully-failed run (rows == [], e.g. every geocode
+    # attempt raised due to bad credentials or an API outage) still produces
+    # an empty DataFrame with the columns dropna()/the final column-select
+    # below expect, instead of pd.DataFrame([]) with zero columns.
+    df = pd.DataFrame(rows, columns=["query", "postal_code", "address", "lat", "lon"])
     before = len(df)
     df = df.dropna(subset=["lat", "lon", "postal_code"])
     dropped = before - len(df)

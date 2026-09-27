@@ -19,6 +19,7 @@ Two-stage approach:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,7 +42,14 @@ def _load_route_cache() -> dict[tuple[str, str], float | None]:
         # keys used everywhere else in this module - silently breaking the
         # cache (100% miss on every resumed run). zip() over columns instead
         # of iterrows() also avoids per-row Series overhead on ~200k+ rows.
-        cached = pd.read_csv(config.ROUTE_CACHE_PATH, dtype={"postal_code": str})
+        try:
+            cached = pd.read_csv(config.ROUTE_CACHE_PATH, dtype={"postal_code": str})
+        except pd.errors.EmptyDataError:
+            # A prior run could have saved an empty cache (e.g. a --limit run
+            # whose candidates all fell outside the prefilter radius), which
+            # writes a header-less/empty file. Treat it as a cold cache
+            # rather than crashing.
+            return {}
         if "dining_id" not in cached.columns:
             # Pre-existing cache from before the dining_id cache-key schema
             # change (it had a "dining_idx" column instead) - positional
@@ -61,12 +69,22 @@ def _load_route_cache() -> dict[tuple[str, str], float | None]:
 
 
 def _save_route_cache(cache: dict[tuple[str, str], float | None]) -> None:
+    if not cache:
+        # pd.DataFrame([]).to_csv() writes just "\n" with no header, which
+        # pd.read_csv then can't parse (EmptyDataError) - avoid ever writing
+        # that shape of file. An empty cache is equivalent to no file.
+        return
     config.DATA_RAW_DIR.mkdir(parents=True, exist_ok=True)
     rows = [
         {"postal_code": pc, "dining_id": did, "walk_distance_m": dist}
         for (pc, did), dist in cache.items()
     ]
-    pd.DataFrame(rows).to_csv(config.ROUTE_CACHE_PATH, index=False)
+    # Write to a temp file and atomically replace the cache so a crash/kill
+    # mid-write can't truncate or corrupt results accumulated across
+    # potentially many prior resumed runs.
+    tmp_path = config.ROUTE_CACHE_PATH.with_suffix(".tmp")
+    pd.DataFrame(rows).to_csv(tmp_path, index=False)
+    os.replace(tmp_path, config.ROUTE_CACHE_PATH)
 
 
 def _dining_ids(dining: pd.DataFrame) -> list[str]:
@@ -74,8 +92,15 @@ def _dining_ids(dining: pd.DataFrame) -> list[str]:
     # DataFrame's positional row order changing across pipeline runs (e.g.
     # a re-run of `python main.py dining` reordering or adding/removing
     # rows) - unlike a positional index, which would then silently point
-    # cached distances at the wrong dining location.
-    return (dining["postal_code"].astype(str) + "|" + dining["name"].fillna("").astype(str)).tolist()
+    # cached distances at the wrong dining location. lat/lon are included,
+    # not just postal_code+name, because two genuinely distinct venues can
+    # share a postal code and name (e.g. two outlets of the same chain in
+    # one building) - without lat/lon they'd collapse to the same id and
+    # the aggregation in compute() would undercount them as one.
+    return (
+        dining["postal_code"].astype(str) + "|" + dining["name"].fillna("").astype(str)
+        + "|" + dining["lat"].astype(str) + "|" + dining["lon"].astype(str)
+    ).tolist()
 
 
 def walk_distance_m(client: OneMapClient, start: tuple[float, float], end: tuple[float, float]) -> float | None:
@@ -152,26 +177,38 @@ def compute(
             cache[(postal_code, dining_id)] = dist
             completed += 1
             if completed % flush_every == 0:
-                _save_route_cache(cache)
+                try:
+                    _save_route_cache(cache)
+                except OSError as exc:
+                    # Don't let a periodic-flush I/O failure (disk full,
+                    # permission error) crash the whole run via future.result()
+                    # below and skip the unconditional final save - just warn
+                    # and keep going; the next flush or the final save retries it.
+                    print(f"  warning: periodic route-cache flush failed, will retry: {exc}")
 
     if pending:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_resolve, item) for item in pending]
-            for _ in tqdm(as_completed(futures), total=len(futures), desc="Routing calls"):
-                pass
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Routing calls"):
+                future.result()
 
     _save_route_cache(cache)
 
     counts = []
     for row_i, dining_idxs in enumerate(candidate_indices):
         postal_code = postal_codes[row_i]
-        within_1km = sum(
-            1
+        # Count distinct dining_ids, not raw dining_idx occurrences - guards
+        # against duplicate rows in the dining source data (e.g. the same
+        # venue listed twice) inflating the count, even if fetch_dining.py's
+        # own dedup is ever bypassed.
+        matched_ids = {
+            did
             for dining_idx in dining_idxs
-            if (dist := cache.get((postal_code, dining_ids[int(dining_idx)]))) is not None
+            if (did := dining_ids[int(dining_idx)])
+            and (dist := cache.get((postal_code, did))) is not None
             and dist <= config.WALK_DISTANCE_THRESHOLD_M
-        )
-        counts.append(within_1km)
+        }
+        counts.append(len(matched_ids))
 
     out = residential.copy()
     out["num_dining_options_within_1km_walk"] = counts
