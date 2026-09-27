@@ -49,6 +49,6 @@ STRAIGHT_LINE_PREFILTER_RADIUS_M = WALK_DISTANCE_THRESHOLD_M
 EARTH_RADIUS_M = 6_371_000
 
 # --- Rate limiting / HTTP behaviour ---------------------------------------
-MIN_REQUEST_INTERVAL_SECONDS = 0.2  # simple per-thread client-side throttle
-MAX_RETRIES = 5
+MIN_REQUEST_INTERVAL_SECONDS = 0.2  # shared client-side throttle across all threads
+MAX_ATTEMPTS = 5  # total attempts per call (tenacity's stop_after_attempt counts the initial try, so this is 4 retries)
 ROUTING_MAX_WORKERS = 6  # concurrent routing calls; empirically ~5 req/s is the ceiling before 429s pile up

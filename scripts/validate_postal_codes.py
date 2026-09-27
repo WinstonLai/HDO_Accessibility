@@ -6,11 +6,16 @@ becomes "81001"). See CLAUDE.md's "Cache-loading gotcha" section.
 
 Usage: python scripts/validate_postal_codes.py [file ...]
 With no args, checks the tracked deliverable
-(data/processed/accessibility_by_postal_code.csv).
+(data/processed/accessibility_by_postal_code.csv) from the working tree.
+Pass "-" as the sole arg to instead read CSV content from stdin (e.g. via
+`git show :path | validate_postal_codes.py -`, so the pre-commit hook
+validates the staged blob rather than the working-tree copy, which may have
+diverged from what's actually staged).
 Exits non-zero and prints offending rows if any postal_code fails to
 match ^\\d{6}$.
 """
 
+import io
 import sys
 from pathlib import Path
 
@@ -20,22 +25,34 @@ DEFAULT_TARGETS = [Path("data/processed/accessibility_by_postal_code.csv")]
 POSTAL_CODE_RE = r"^\d{6}$"
 
 
-def validate_file(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    df = pd.read_csv(path, dtype={"postal_code": str})
+def _check_postal_codes(df: pd.DataFrame, label: str) -> list[str]:
     if "postal_code" not in df.columns:
         return []
     bad = df[df["postal_code"].notna() & ~df["postal_code"].str.match(POSTAL_CODE_RE)]
     if bad.empty:
         return []
     sample = bad["postal_code"].head(10).tolist()
-    return [f"{path}: {len(bad)} row(s) with malformed postal_code, e.g. {sample}"]
+    return [f"{label}: {len(bad)} row(s) with malformed postal_code, e.g. {sample}"]
+
+
+def validate_file(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    df = pd.read_csv(path, dtype={"postal_code": str})
+    return _check_postal_codes(df, str(path))
+
+
+def validate_stdin() -> list[str]:
+    df = pd.read_csv(io.StringIO(sys.stdin.read()), dtype={"postal_code": str})
+    return _check_postal_codes(df, "<stdin>")
 
 
 def main(argv: list[str]) -> int:
-    targets = [Path(p) for p in argv] if argv else DEFAULT_TARGETS
-    errors = [msg for path in targets for msg in validate_file(path)]
+    if argv == ["-"]:
+        errors = validate_stdin()
+    else:
+        targets = [Path(p) for p in argv] if argv else DEFAULT_TARGETS
+        errors = [msg for path in targets for msg in validate_file(path)]
     if errors:
         print("postal_code validation failed:")
         for msg in errors:

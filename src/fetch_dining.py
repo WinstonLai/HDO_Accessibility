@@ -42,7 +42,7 @@ def _parse_latlng(row: dict[str, Any]) -> tuple[float | None, float | None]:
                 try:
                     return float(lat_str.strip()), float(lon_str.strip())
                 except ValueError:
-                    return None, None
+                    break
     lat = _first_present(row, LAT_KEYS)
     lon = _first_present(row, LON_KEYS)
     try:
@@ -79,6 +79,13 @@ def fetch_theme_points(client: OneMapClient, query_name: str) -> pd.DataFrame:
     dropped = before - len(df)
     if dropped:
         print(f"Dropped {dropped}/{before} dining rows with no parseable coordinates.")
+
+    before = len(df)
+    df = df.drop_duplicates(subset=["postal_code", "name", "lat", "lon"])
+    duplicates = before - len(df)
+    if duplicates:
+        print(f"Dropped {duplicates}/{before} exact-duplicate dining rows (same postal_code/name/lat/lon).")
+
     return df.reset_index(drop=True)
 
 

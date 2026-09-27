@@ -10,11 +10,13 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-if [ ! -f data/processed/accessibility_by_postal_code.csv ]; then
-    exit 0
-fi
+target="data/processed/accessibility_by_postal_code.csv"
 
-if ! git diff --cached --name-only | grep -q '^data/processed/accessibility_by_postal_code\.csv$'; then
+# Capture staged file names to a variable first (not piped straight into
+# grep) so a SIGPIPE from grep -q exiting early can't make the pipeline's
+# exit status look like "not staged" under `set -o pipefail`.
+staged_files="$(git diff --cached --name-only)"
+if ! grep -qxF "$target" <<< "$staged_files"; then
     exit 0
 fi
 
@@ -23,7 +25,10 @@ if [ -x .venv/bin/python ]; then
     python=".venv/bin/python"
 fi
 
-if ! "$python" scripts/validate_postal_codes.py; then
+# Validate the staged blob, not the working-tree copy - they can diverge
+# (e.g. further edits after `git add` without re-staging), and the hook
+# should judge what's actually about to be committed.
+if ! git show ":${target}" | "$python" scripts/validate_postal_codes.py -; then
     echo "pre-commit hook: aborting commit due to postal_code validation failure." >&2
     exit 1
 fi

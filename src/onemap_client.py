@@ -96,25 +96,29 @@ class OneMapClient:
 
     def __init__(self) -> None:
         # A single requests.Session is safe to share across threads for
-        # simple GET calls; _local gives each worker thread its own
-        # last-request timestamp so per-thread throttling doesn't serialize
-        # concurrent callers against each other.
+        # simple GET calls. Throttle state (_throttle_lock/_last_request_time)
+        # is shared across all threads, not per-thread - OneMap's ~5 req/s
+        # ceiling is a server-side aggregate limit, so per-thread throttling
+        # would let N concurrent workers each independently run at 5 req/s,
+        # multiplying aggregate throughput by N over the real ceiling.
         self._session = requests.Session()
-        self._local = threading.local()
+        self._throttle_lock = threading.Lock()
+        self._last_request_time = 0.0
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": get_token()}
 
     def _throttle(self) -> None:
-        last = getattr(self._local, "last_request_time", 0.0)
-        elapsed = time.monotonic() - last
-        wait = config.MIN_REQUEST_INTERVAL_SECONDS - elapsed
-        if wait > 0:
-            time.sleep(wait)
+        with self._throttle_lock:
+            elapsed = time.monotonic() - self._last_request_time
+            wait = config.MIN_REQUEST_INTERVAL_SECONDS - elapsed
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_time = time.monotonic()
 
     @retry(
         retry=retry_if_exception_type(RetryableHTTPError),
-        stop=stop_after_attempt(config.MAX_RETRIES),
+        stop=stop_after_attempt(config.MAX_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=30),
         reraise=True,
     )
@@ -122,7 +126,6 @@ class OneMapClient:
         self._throttle()
         url = f"{base_url}{path}"
         resp = self._session.get(url, params=params, headers=self._headers(), timeout=30)
-        self._local.last_request_time = time.monotonic()
 
         if resp.status_code == 401:
             # Token likely expired/invalid mid-run: force a refresh and retry once.
