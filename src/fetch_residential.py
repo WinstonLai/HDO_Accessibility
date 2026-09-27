@@ -172,7 +172,13 @@ def main() -> None:
     hdb_df = geocode_hdb_blocks(client, blocks)
     condo_df = fetch_condo_locations(client)
 
-    combined = pd.concat([hdb_df, condo_df], ignore_index=True)
+    # Drop empty frames before concatenating - pandas warns that including an
+    # empty/all-NA frame in concat is deprecated (its dtypes currently get
+    # excluded from the result's dtype inference, but won't be in a future
+    # version). condo_df is empty whenever RESIDENTIAL_THEME_QUERYNAME is
+    # unset (the common case), so this isn't just theoretical.
+    frames = [df for df in (hdb_df, condo_df) if not df.empty]
+    combined = pd.concat(frames, ignore_index=True) if frames else hdb_df.iloc[0:0]
     combined = combined.drop_duplicates(subset=["postal_code"]).reset_index(drop=True)
     combined.to_csv(config.RESIDENTIAL_OUTPUT_PATH, index=False)
     print(
