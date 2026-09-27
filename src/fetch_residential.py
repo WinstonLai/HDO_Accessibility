@@ -78,7 +78,9 @@ def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: 
                     params={"searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": page_num},
                 )
                 results = payload.get("results", [])
-                total_pages = int(payload.get("totalNumPages") or 1)
+                # Capped so one query with many low-quality results can't
+                # page through dozens of throttled requests unbounded.
+                total_pages = min(int(payload.get("totalNumPages") or 1), config.GEOCODE_SEARCH_MAX_PAGES)
                 # Prefer the first result with a real postal code - OneMap sometimes
                 # returns a same-address facility (e.g. a community centre sharing
                 # the block/street) with POSTAL "NIL" ahead of the residential block.
@@ -113,7 +115,11 @@ def geocode_hdb_blocks(client: OneMapClient, blocks: pd.DataFrame, flush_every: 
         print(f"{still_unresolved}/{len(queries)} addresses failed to geocode this run and will be "
               "retried on the next run.")
     rows = [cache[q] for q in queries if q in cache]
-    df = pd.DataFrame(rows)
+    # Explicit columns so a fully-failed run (rows == [], e.g. every geocode
+    # attempt raised due to bad credentials or an API outage) still produces
+    # an empty DataFrame with the columns dropna()/the final column-select
+    # below expect, instead of pd.DataFrame([]) with zero columns.
+    df = pd.DataFrame(rows, columns=["query", "postal_code", "address", "lat", "lon"])
     before = len(df)
     df = df.dropna(subset=["lat", "lon", "postal_code"])
     dropped = before - len(df)

@@ -52,3 +52,9 @@ EARTH_RADIUS_M = 6_371_000
 MIN_REQUEST_INTERVAL_SECONDS = 0.2  # shared client-side throttle across all threads
 MAX_ATTEMPTS = 5  # total attempts per call (tenacity's stop_after_attempt counts the initial try, so this is 4 retries)
 ROUTING_MAX_WORKERS = 6  # concurrent routing calls; empirically ~5 req/s is the ceiling before 429s pile up
+
+# --- Geocoding -------------------------------------------------------------
+# Cap on how many Search API result pages geocode_hdb_blocks will page
+# through looking for a non-NIL postal match, so one ambiguous/ high-result
+# query can't issue dozens of sequential, throttled requests unbounded.
+GEOCODE_SEARCH_MAX_PAGES = 5

@@ -92,8 +92,15 @@ def _dining_ids(dining: pd.DataFrame) -> list[str]:
     # DataFrame's positional row order changing across pipeline runs (e.g.
     # a re-run of `python main.py dining` reordering or adding/removing
     # rows) - unlike a positional index, which would then silently point
-    # cached distances at the wrong dining location.
-    return (dining["postal_code"].astype(str) + "|" + dining["name"].fillna("").astype(str)).tolist()
+    # cached distances at the wrong dining location. lat/lon are included,
+    # not just postal_code+name, because two genuinely distinct venues can
+    # share a postal code and name (e.g. two outlets of the same chain in
+    # one building) - without lat/lon they'd collapse to the same id and
+    # the aggregation in compute() would undercount them as one.
+    return (
+        dining["postal_code"].astype(str) + "|" + dining["name"].fillna("").astype(str)
+        + "|" + dining["lat"].astype(str) + "|" + dining["lon"].astype(str)
+    ).tolist()
 
 
 def walk_distance_m(client: OneMapClient, start: tuple[float, float], end: tuple[float, float]) -> float | None:
@@ -170,7 +177,14 @@ def compute(
             cache[(postal_code, dining_id)] = dist
             completed += 1
             if completed % flush_every == 0:
-                _save_route_cache(cache)
+                try:
+                    _save_route_cache(cache)
+                except OSError as exc:
+                    # Don't let a periodic-flush I/O failure (disk full,
+                    # permission error) crash the whole run via future.result()
+                    # below and skip the unconditional final save - just warn
+                    # and keep going; the next flush or the final save retries it.
+                    print(f"  warning: periodic route-cache flush failed, will retry: {exc}")
 
     if pending:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -188,9 +202,10 @@ def compute(
         # venue listed twice) inflating the count, even if fetch_dining.py's
         # own dedup is ever bypassed.
         matched_ids = {
-            dining_ids[int(dining_idx)]
+            did
             for dining_idx in dining_idxs
-            if (dist := cache.get((postal_code, dining_ids[int(dining_idx)]))) is not None
+            if (did := dining_ids[int(dining_idx)])
+            and (dist := cache.get((postal_code, did))) is not None
             and dist <= config.WALK_DISTANCE_THRESHOLD_M
         }
         counts.append(len(matched_ids))
