@@ -58,3 +58,19 @@ The same class of bug (missing `dtype={"postal_code": str}` on a `pd.read_csv`) 
 
 - `.env`, `.token_cache.json`, `.venv/`, `data/raw/` are gitignored (secrets, regenerable caches/intermediates).
 - `data/processed/accessibility_by_postal_code.csv` is the one tracked deliverable — the final answer to the business question, committed intentionally so it's reviewable without re-running the whole pipeline.
+
+## Dashboard
+
+`dashboard/app.py` is a Streamlit app that browses `data/processed/accessibility_by_postal_code.csv` without needing to open the raw CSV. Run locally with `streamlit run dashboard/app.py`.
+
+- **Sidebar filters** (postal district multiselect, dining-options-within-1km range slider, address/postal-code search) narrow the working DataFrame; every tab below reacts to the same filtered set.
+- **KPI row**: addresses shown, mean/median options, % of addresses with 0 options, max options.
+- **Individual Addresses** tab: a pydeck `ScatterplotLayer` map, one point per postal code, colored red→green by option count (scale capped at the 95th percentile so outliers don't wash out the gradient) with radius also scaled to option count.
+- **Hex Density (H3)** tab: `dashboard/data.py`'s `hex_aggregate` buckets points into H3 cells (user-adjustable resolution 7–10) and renders a pydeck `H3HexagonLayer` colored by mean options per cell.
+- **District Comparison** tab: `dashboard/data.py`'s `district_aggregate` groups by postal district (via `dashboard/districts.py`'s static `SECTOR_TO_DISTRICT` lookup — URA's 28-district postal-sector table, hardcoded since it's stable public reference data, not something OneMap exposes) into a Plotly horizontal bar chart plus best/worst-5 tables.
+- **Distribution** tab: Plotly histogram of option counts across filtered addresses.
+- **Data Table** tab: filtered rows with a CSV download button.
+
+`dashboard/data.py`'s `load_accessibility_data` reads the CSV with `dtype={"postal_code": str}` — same leading-zero gotcha as elsewhere in this repo (see above); don't drop it.
+
+**Deployed** on Streamlit Community Cloud at https://hdoaccessibility-efgzng32zrdwamfydfpjgb.streamlit.app/, tracking `main` / `dashboard/app.py`. The repo is public, so Community Cloud auto-redeploys on every push to `main` — no manual republish step needed after merging dashboard changes.
