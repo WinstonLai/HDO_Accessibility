@@ -244,6 +244,7 @@ with tab_table:
         "address",
         "district_label",
         COUNT_COL,
+        "dining_option_names_within_1km_walk",
         "source",
         "lat",
         "lon",

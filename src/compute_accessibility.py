@@ -194,24 +194,29 @@ def compute(
 
     _save_route_cache(cache)
 
+    dining_names = dining["name"].astype(str).tolist()
+
     counts = []
+    names = []
     for row_i, dining_idxs in enumerate(candidate_indices):
         postal_code = postal_codes[row_i]
-        # Count distinct dining_ids, not raw dining_idx occurrences - guards
-        # against duplicate rows in the dining source data (e.g. the same
-        # venue listed twice) inflating the count, even if fetch_dining.py's
-        # own dedup is ever bypassed.
-        matched_ids = {
-            did
-            for dining_idx in dining_idxs
-            if (did := dining_ids[int(dining_idx)])
-            and (dist := cache.get((postal_code, did))) is not None
-            and dist <= config.WALK_DISTANCE_THRESHOLD_M
-        }
-        counts.append(len(matched_ids))
+        # Dedup by dining_id, not raw dining_idx occurrences - guards against
+        # duplicate rows in the dining source data (e.g. the same venue
+        # listed twice) inflating the count, even if fetch_dining.py's own
+        # dedup is ever bypassed.
+        matched_idx_by_id = {}
+        for dining_idx in dining_idxs:
+            dining_idx = int(dining_idx)
+            did = dining_ids[dining_idx]
+            dist = cache.get((postal_code, did))
+            if dist is not None and dist <= config.WALK_DISTANCE_THRESHOLD_M:
+                matched_idx_by_id[did] = dining_idx
+        counts.append(len(matched_idx_by_id))
+        names.append("; ".join(sorted(dining_names[idx] for idx in matched_idx_by_id.values())))
 
     out = residential.copy()
     out["num_dining_options_within_1km_walk"] = counts
+    out["dining_option_names_within_1km_walk"] = names
     return out
 
 
