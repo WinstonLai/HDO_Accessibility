@@ -138,43 +138,90 @@ def compute(
     res_lat, res_lon = residential["lat"].to_numpy(), residential["lon"].to_numpy()
     dine_lat, dine_lon = dining["lat"].to_numpy(), dining["lon"].to_numpy()
 
-    # Build the flat list of (postal_code, dining_id) pairs not yet resolved.
-    pending: list[tuple[str, str, tuple[float, float], tuple[float, float]]] = []
-    seen: set[tuple[str, str]] = set()
+    # Dedup routing calls by (postal_code, dining coordinate), not by
+    # (postal_code, dining_id): co-located dining options (e.g. many stalls
+    # sharing one mall/food-court address) have byte-identical start/end
+    # coordinates, so they resolve to the same route and always co-occur as
+    # candidates (identical distance from any residential point -> both in or
+    # both out of the prefilter radius). Rounding to 6dp (~11cm) only groups
+    # genuinely co-located points; the unrounded coordinate is still used for
+    # the actual API call. This can cut routing-call volume substantially
+    # (e.g. 1813 dining rows -> 689 distinct coordinates in one snapshot of
+    # this data) without changing which dining_ids end up cached or the
+    # final answer.
+    dine_coord_key = list(zip(dine_lat.round(6), dine_lon.round(6)))
+
+    # Each pending entry's dids list is mutated in place (to merge in dids
+    # discovered from a later residential row sharing the same postal_code +
+    # coordinate group), so pending_index maps back to the entry to extend.
+    pending: list[tuple[str, tuple[float, float], tuple[float, float], list[str]]] = []
+    pending_index: dict[tuple[str, tuple[float, float]], int] = {}
+    already_cached_count = 0
+    propagated_count = 0
     for row_i, dining_idxs in enumerate(candidate_indices):
         postal_code = postal_codes[row_i]
         start = (res_lat[row_i], res_lon[row_i])
+        groups: dict[tuple[float, float], list[int]] = {}
         for dining_idx in dining_idxs:
-            dining_idx = int(dining_idx)
-            dining_id = dining_ids[dining_idx]
-            key = (postal_code, dining_id)
-            if key in cache or key in seen:
+            groups.setdefault(dine_coord_key[int(dining_idx)], []).append(int(dining_idx))
+        for coord_key, group_idxs in groups.items():
+            group_dids = [dining_ids[idx] for idx in group_idxs]
+            cached_dist = None
+            uncached_dids = []
+            for did in group_dids:
+                key = (postal_code, did)
+                if key in cache:
+                    cached_dist = cache[key]
+                    already_cached_count += 1
+                else:
+                    uncached_dids.append(did)
+            if not uncached_dids:
                 continue
-            seen.add(key)
-            pending.append((postal_code, dining_id, start, (dine_lat[dining_idx], dine_lon[dining_idx])))
+            if cached_dist is not None:
+                # Another dining_id at this same coordinate was already
+                # cached (e.g. from a run before this dedup existed) -
+                # reuse its distance instead of re-querying.
+                for did in uncached_dids:
+                    cache[(postal_code, did)] = cached_dist
+                propagated_count += len(uncached_dids)
+                continue
+            pk = (postal_code, coord_key)
+            if pk in pending_index:
+                existing_dids = pending[pending_index[pk]][3]
+                for did in uncached_dids:
+                    if did not in existing_dids:
+                        existing_dids.append(did)
+                continue
+            end = (dine_lat[group_idxs[0]], dine_lon[group_idxs[0]])
+            pending_index[pk] = len(pending)
+            pending.append((postal_code, start, end, uncached_dids))
 
     total_pairs = sum(len(idxs) for idxs in candidate_indices)
+    to_resolve_pairs = sum(len(item[3]) for item in pending)
     print(
         f"{total_pairs} candidate pairs within {config.STRAIGHT_LINE_PREFILTER_RADIUS_M}m straight-line "
-        f"radius ({total_pairs - len(pending)} already cached, {len(pending)} to resolve via routing API "
-        f"with {max_workers} concurrent workers)."
+        f"radius ({already_cached_count} already cached, {propagated_count} resolved via same-coordinate "
+        f"reuse, {to_resolve_pairs} pairs to resolve via {len(pending)} deduped routing calls with "
+        f"{max_workers} concurrent workers)."
     )
 
     cache_lock = threading.Lock()
     completed = 0
 
-    def _resolve(item: tuple[str, str, tuple[float, float], tuple[float, float]]) -> None:
+    def _resolve(item: tuple[str, tuple[float, float], tuple[float, float], list[str]]) -> None:
         nonlocal completed
-        postal_code, dining_id, start, end = item
+        postal_code, start, end, dining_id_group = item
         try:
             dist = walk_distance_m(client, start, end)
         except Exception as exc:  # noqa: BLE001 - leave uncached so a resumed run retries it, keep going
-            print(f"  routing failed for postal_code={postal_code} dining_id={dining_id}: {exc}")
+            print(f"  routing failed for postal_code={postal_code} dining_ids={dining_id_group}: {exc}")
             with cache_lock:
                 completed += 1
             return
         with cache_lock:
-            cache[(postal_code, dining_id)] = dist
+            # One routing call resolves every dining_id co-located at `end`.
+            for dining_id in dining_id_group:
+                cache[(postal_code, dining_id)] = dist
             completed += 1
             if completed % flush_every == 0:
                 try:

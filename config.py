@@ -49,9 +49,18 @@ STRAIGHT_LINE_PREFILTER_RADIUS_M = WALK_DISTANCE_THRESHOLD_M
 EARTH_RADIUS_M = 6_371_000
 
 # --- Rate limiting / HTTP behaviour ---------------------------------------
-MIN_REQUEST_INTERVAL_SECONDS = 0.2  # shared client-side throttle across all threads
+# OneMap's documented limit is 250 requests/minute (~4.167 req/s) - matches
+# the ~5 req/s empirical ceiling. 0.24s keeps the shared throttle at/under
+# the documented rate instead of slightly over it, since a 429 costs a much
+# more expensive exponential backoff (starts at 1s) than the interval saved
+# by pacing tighter than the documented limit.
+MIN_REQUEST_INTERVAL_SECONDS = 0.24  # shared client-side throttle across all threads
 MAX_ATTEMPTS = 5  # total attempts per call (tenacity's stop_after_attempt counts the initial try, so this is 4 retries)
-ROUTING_MAX_WORKERS = 6  # concurrent routing calls; empirically ~5 req/s is the ceiling before 429s pile up
+# The shared throttle (not this count) gates the real aggregate dispatch
+# rate, so this only needs to be high enough that a free worker is always
+# available when the throttle timer allows the next request - it does not
+# multiply throughput past the ~5 req/s ceiling.
+ROUTING_MAX_WORKERS = 10
 
 # --- Geocoding -------------------------------------------------------------
 # Cap on how many Search API result pages geocode_hdb_blocks will page
