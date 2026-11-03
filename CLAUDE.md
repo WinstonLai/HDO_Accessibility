@@ -73,4 +73,4 @@ The same class of bug (missing `dtype={"postal_code": str}` on a `pd.read_csv`) 
 
 `dashboard/data.py`'s `load_accessibility_data` reads the CSV with `dtype={"postal_code": str}` — same leading-zero gotcha as elsewhere in this repo (see above); don't drop it.
 
-**Deployed** on Streamlit Community Cloud at https://hdoaccessibility-efgzng32zrdwamfydfpjgb.streamlit.app/, tracking `main` / `dashboard/app.py`. The repo is public, so Community Cloud auto-redeploys on every push to `main` — no manual republish step needed after merging dashboard changes.
+**Deployed** on Streamlit Community Cloud at https://hdo-accessibility.streamlit.app/, tracking `main` / `dashboard/app.py`. The repo is public, so Community Cloud auto-redeploys on every push to `main` — no manual republish step needed after merging dashboard changes.

@@ -4,7 +4,7 @@ How many [HPB Healthier Dining Programme](https://www.hpb.gov.sg/healthy-living/
 
 This pipeline sources both datasets through [OneMap](https://www.onemap.gov.sg/) (Singapore's national map platform) and computes true walking-route distance — not straight-line — via OneMap's Routing API.
 
-**[Explore the results in the live dashboard →](https://hdoaccessibility-efgzng32zrdwamfydfpjgb.streamlit.app/)**
+**[Explore the results in the live dashboard →](https://hdo-accessibility.streamlit.app/)**
 
 ## What it does
 
